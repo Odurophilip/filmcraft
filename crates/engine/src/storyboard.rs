@@ -35,8 +35,9 @@ const MIN_SCENE: f64 = 1.0;
 const DEFAULT_SCENE: f64 = 4.0;
 /// Fade of the scene text in and out.
 const TEXT_FADE: f64 = 0.4;
-/// Words per caption.
+/// Words per caption (tall frames: [`CAPTION_WORDS_TALL`]).
 const CAPTION_WORDS: usize = 7;
+const CAPTION_WORDS_TALL: usize = 4;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -192,16 +193,16 @@ fn id_of(r: &Value, key: &str) -> Result<u64> {
     r[key].as_u64().ok_or_else(|| EngineError::Other(format!("{CMD}: expected `{key}` in {r}")))
 }
 
-/// Split narration into captions of about [`CAPTION_WORDS`] words, timed by their share of the
+/// Split narration into captions of about `per` words, timed by their share of the
 /// words over the speech's length.
-fn caption_chunks(text: &str, speech: f64) -> Vec<(String, f64, f64)> {
+fn caption_chunks(text: &str, speech: f64, per: usize) -> Vec<(String, f64, f64)> {
     let words: Vec<&str> = text.split_whitespace().filter(|w| !w.starts_with("[pause")).collect();
     if words.is_empty() || speech <= 0.0 {
         return Vec::new();
     }
     let per_word = speech / words.len() as f64;
     words
-        .chunks(CAPTION_WORDS)
+        .chunks(per)
         .scan(0usize, |at, c| {
             let start = *at as f64 * per_word;
             *at += c.len();
@@ -261,7 +262,13 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             Tick((t.0 + fd - 1) / fd * fd)
         };
         let caption_track = if plan.captions.unwrap_or(true) && plan.scenes.iter().any(|sc| sc.narration.is_some()) {
-            Some(id_of(&s.execute("captions.newTrack", json!({"format": "Subtitle", "name": "Narration"}))?, "track")?)
+            let track = id_of(&s.execute("captions.newTrack", json!({"format": "Subtitle", "name": "Narration"}))?, "track")?;
+            if h > w {
+                // caption size follows the frame height: keep it in proportion to a tall frame's width
+                let size = (54.0 * w as f64 / h as f64 * 1.2).round();
+                s.execute("captions.setStyle", json!({"track": track, "size": size}))?;
+            }
+            Some(track)
         } else {
             None
         };
@@ -361,7 +368,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                 // boundaries on whole frames, so neighbouring captions never overlap
                 let fd = rate.frame_duration().0.max(1);
                 let frame = |x: f64| Tick((ticks(x).0 as f64 / fd as f64).round() as i64 * fd);
-                for (line, at, len) in caption_chunks(text, speech) {
+                for (line, at, len) in caption_chunks(text, speech, if h > w { CAPTION_WORDS_TALL } else { CAPTION_WORDS }) {
                     let (a, b) = (t + frame(at), t + frame(at + len));
                     if b <= a {
                         continue;

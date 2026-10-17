@@ -279,8 +279,31 @@ pub fn download_files(dir: &Path, files: &[ModelFile], progress: DownloadProgres
 
 #[cfg(feature = "download")]
 fn agent() -> ureq::Agent {
+    agent_with(true, None)
+}
+
+/// POST a JSON `body` to `url` over HTTPS (the same pure-Rust TLS and OS certificate verifier as
+/// the model downloads) and return the status and the response body, also for error statuses, so
+/// the caller can read the service's error message. Hosts use it for web APIs.
+#[cfg(feature = "download")]
+pub fn post_json(url: &str, headers: &[(&str, &str)], body: &str, timeout: std::time::Duration) -> Result<(u16, String), crate::SpeechError> {
+    use crate::SpeechError;
+    let mut req = agent_with(false, Some(timeout)).post(url).header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send(body).map_err(|e| SpeechError::Download(format!("{url}: {e}")))?;
+    let status = resp.status().as_u16();
+    let text = resp.into_body().read_to_string().map_err(|e| SpeechError::Download(format!("{url}: {e}")))?;
+    Ok((status, text))
+}
+
+#[cfg(feature = "download")]
+fn agent_with(status_as_error: bool, timeout: Option<std::time::Duration>) -> ureq::Agent {
     let provider = std::sync::Arc::new(rustls_rustcrypto::provider());
     ureq::Agent::config_builder()
+        .http_status_as_error(status_as_error)
+        .timeout_global(timeout)
         .tls_config(
             ureq::tls::TlsConfig::builder()
                 .provider(ureq::tls::TlsProvider::Rustls)

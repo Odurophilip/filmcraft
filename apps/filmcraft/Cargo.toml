@@ -16,6 +16,8 @@ default = []
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 # Natural Text to Speech voices (Kokoro-82M on the CPU, downloaded on first use).
 neural-voices = ["filmcraft-engine/neural-voices"]
+# Video from a prompt (File ▸ New ▸ Video from Prompt…): Claude writes the storyboard.
+storyboard-ai = ["filmcraft-engine/storyboard-ai"]
 
 [dependencies]
 filmcraft-engine = { workspace = true }

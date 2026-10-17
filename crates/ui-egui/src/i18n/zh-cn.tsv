@@ -3585,3 +3585,8 @@
 	Shows the version, community links and credits in a FilmCraft window.	在 FilmCraft 窗口中显示版本、社区链接和致谢。
 	Couldn't open your web browser	无法打开网页浏览器
 	Open this address in your browser yourself:	请自行在浏览器中打开此地址：
+
+# Video from a storyboard / a prompt
+	Storyboard	故事板
+	New Video from Storyboard…	从故事板新建视频…
+	Video from Prompt…	根据提示生成视频…

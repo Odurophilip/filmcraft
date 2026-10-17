@@ -71,6 +71,7 @@ fn meta(command: &str) -> Option<(&'static str, &'static str, &'static str)> {
         "help.systemCompatibilityReport" => (tl!("System Compatibility Report"), "systemReport", tl!("Close")),
         "file.newColorMatte" => (tl!("New Color Matte"), "colorMatte", tl!("OK")),
         "project.matteColor" => (tl!("Color Matte Color"), "matteColor", tl!("OK")),
+        "storyboard.fromPrompt" => ("New Video from Prompt", "videoFromPrompt", "Create Video"),
         _ => return None,
     })
 }
@@ -94,6 +95,7 @@ fn dialog_command(id: &str) -> Option<&'static str> {
         "markers.addFlashCue" => "markers.addFlashCue",
         "file.newColorMatte" => "file.newColorMatte",
         "project.matteColor" => "project.matteColor",
+        "storyboard.fromPrompt" => "storyboard.fromPrompt",
         _ => return None,
     })
 }
@@ -363,8 +365,16 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str) -> Result<(Value, Value
             let (id, color) = matte.ok_or("select one Color Matte")?;
             (json!({"item": id.0, "color": filmcraft_color::to_hex(color)}), Value::Null)
         }
+        "storyboard.fromPrompt" => (json!({"prompt": "", "seconds": 30.0, "format": "16:9", "captions": true}), prompt_info(s)),
         _ => (json!({}), Value::Null),
     })
+}
+
+/// Video from Prompt: whether the build can call Claude and whether a key is still needed.
+fn prompt_info(s: &filmcraft_engine::Session) -> Value {
+    let reason = filmcraft_engine::storyboard_ai::ready(s).err();
+    let unavailable = reason.as_deref().is_some_and(|r| r.contains("not available"));
+    json!({"unavailable": unavailable, "needsKey": reason.is_some() && !unavailable})
 }
 
 fn check(ui: &mut egui::Ui, elems: &mut Elems, pre: &str, p: &mut Value, key: &str, label: &str) {
@@ -461,6 +471,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut elems: Elems = Vec::new();
     let mut action: Option<&'static str> = None;
     let mut browse: Option<String> = None;
+    let mut save_key: Option<String> = None;
     let info_only = matches!(d.command.as_str(), "file.mediaProperties" | "clip.sourceSettings" | "help.systemCompatibilityReport");
     // the title is translated; the window keeps one id whatever the interface language
     let id = egui::Id::new(("menu-dialog", pre));
@@ -772,6 +783,48 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 number(ui, &mut elems, pre, p, "seconds", tl!("Duration:"), 0.04..=36000.0, " s");
             }
             "project.matteColor" => color(ui, &mut elems, pre, p, "color", tl!("Color:")),
+            "storyboard.fromPrompt" => {
+                ui.label("Describe the video. Claude writes the scenes, narration and captions; you can edit everything afterwards.");
+                let mut v = p["prompt"].as_str().unwrap_or_default().to_string();
+                let r = ui.add(
+                    egui::TextEdit::multiline(&mut v)
+                        .hint_text("e.g. A 30-second launch video for our coffee shop's new oat latte, warm and friendly")
+                        .desired_rows(5)
+                        .desired_width(400.0),
+                );
+                push(&mut elems, format!("{pre}.prompt"), &r, "Prompt");
+                if r.changed() {
+                    p["prompt"] = json!(v);
+                }
+                number(ui, &mut elems, pre, p, "seconds", "Length:", 5.0..=600.0, " s");
+                let formats: Vec<(String, String)> = [("16:9", "Widescreen 16:9"), ("9:16", "Vertical 9:16"), ("1:1", "Square 1:1"), ("4:5", "Portrait 4:5")]
+                    .iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect();
+                combo(ui, &mut elems, &format!("{pre}.format"), "Format:", &mut p["format"], &formats);
+                check(ui, &mut elems, pre, p, "captions", "Captions from the narration");
+                if d.info["unavailable"] == true {
+                    ui.colored_label(egui::Color32::from_rgb(0xe0, 0x60, 0x60), "This build can't call Claude: rebuild with the `storyboard-ai` feature.");
+                } else if d.info["needsKey"] == true {
+                    ui.separator();
+                    ui.label("Claude needs an Anthropic API key (console.anthropic.com). It is saved on this computer, readable only by you.");
+                    ui.horizontal(|ui| {
+                        let key = ui.data_mut(|m| m.get_temp::<String>(egui::Id::new("videoFromPrompt.key")).unwrap_or_default());
+                        let mut k = key.clone();
+                        let r = ui.add(egui::TextEdit::singleline(&mut k).password(true).hint_text("sk-ant-…").desired_width(260.0));
+                        push(&mut elems, format!("{pre}.apiKey"), &r, "API key");
+                        if k != key {
+                            ui.data_mut(|m| m.insert_temp(egui::Id::new("videoFromPrompt.key"), k.clone()));
+                        }
+                        let b = ui.button("Save Key");
+                        push(&mut elems, format!("{pre}.saveKey"), &b, "Save Key");
+                        if b.clicked() {
+                            save_key = Some(k);
+                        }
+                    });
+                }
+                ui.label(RichText::new("Uses Claude (claude-opus-5-5); each video costs a few cents of API usage.").weak());
+            }
             "markers.addFlashCue" => {
                 text(ui, &mut elems, pre, p, "name", tl!("Name:"), 220.0);
                 text(ui, &mut elems, pre, p, "comment", tl!("Comments:"), 220.0);
@@ -842,6 +895,16 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             }
         });
     }
+    if let Some(k) = save_key {
+        match app.session.execute("storyboard.setApiKey", json!({"key": k})) {
+            Ok(_) => {
+                ctx.data_mut(|m| m.remove::<String>(egui::Id::new("videoFromPrompt.key")));
+                d.info = prompt_info(&app.session);
+                d.error.clear();
+            }
+            Err(e) => d.error = e.to_string(),
+        }
+    }
     if crate::widgets::escape_closes(ctx) {
         action = Some("cancel");
     }
@@ -891,6 +954,11 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
             if p["ingest"] != d.info["ingest"] {
                 s.execute("project.ingestSettings", p["ingest"].clone()).map_err(|e| e.to_string())?;
             }
+            Ok(None)
+        }
+        "storyboard.fromPrompt" => {
+            s.execute("storyboard.fromPrompt", p.clone()).map_err(|e| e.to_string())?;
+            app.ui.status = "Claude is writing your video… it appears on the timeline when it's ready.".into();
             Ok(None)
         }
         "file.saveAsTemplate" => {

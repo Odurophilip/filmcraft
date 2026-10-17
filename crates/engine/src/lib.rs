@@ -52,6 +52,7 @@ pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod source_monitor;
 pub mod storyboard;
+pub mod storyboard_ai;
 pub mod sync;
 pub mod transcript;
 pub mod trim;
@@ -428,6 +429,11 @@ pub struct Session {
     pub scene_jobs: Vec<scene_detect::PendingScene>,
     /// Background transcriptions whose transcripts are stored when they finish.
     pub transcribe_jobs: Vec<transcript::PendingTranscribe>,
+    /// Video-from-prompt jobs whose storyboards are built when they finish.
+    pub storyboard_jobs: Vec<storyboard_ai::PendingPrompt>,
+    /// Writes storyboards for `storyboard.fromPrompt` (None = the Claude API). Hosts and tests
+    /// install one here.
+    pub storyboard_planner: Option<storyboard_ai::Planner>,
     /// Effect presets (built-in + the user's, persisted in the data directory).
     pub presets: presets::PresetLibrary,
     /// Export presets (built-in + the user's, persisted in the data directory) and favourites.
@@ -533,6 +539,8 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             transcribe_jobs: Vec::new(),
+            storyboard_jobs: Vec::new(),
+            storyboard_planner: None,
             presets: Default::default(),
             export_presets: Default::default(),
             export_queue: Default::default(),
@@ -629,6 +637,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         transcript::poll(self);
+        storyboard_ai::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };
@@ -1312,6 +1321,8 @@ mod settings_tests;
 mod shortcuts_tests;
 #[cfg(test)]
 mod split_edit_ripple_trim_tests;
+#[cfg(test)]
+mod storyboard_ai_tests;
 #[cfg(test)]
 mod storyboard_tests;
 #[cfg(test)]
