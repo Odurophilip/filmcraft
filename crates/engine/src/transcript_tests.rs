@@ -179,3 +179,74 @@ fn generate_without_a_transcriber() {
     let r = s.execute("transcript.generate", json!({})).unwrap();
     assert!(r["items"].as_array().unwrap().len() >= 2, "{r}");
 }
+
+/// Run `poll_persistence` until no background transcription is left.
+fn drain(s: &mut Session) {
+    let t0 = std::time::Instant::now();
+    while !s.transcribe_jobs.is_empty() {
+        s.poll_persistence();
+        assert!(t0.elapsed().as_secs() < 30, "transcription never finished");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn generate_in_the_background() {
+    let (mut s, item, _) = session();
+    let rev = s.revision;
+    let r = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap();
+    let job = r["job"].as_u64().expect("returns a job");
+    drain(&mut s);
+    assert_eq!(s.project.transcripts[&item].words.len(), 6, "stored when the job finished");
+    let j = s.execute("jobs.list", json!({})).unwrap();
+    let j = j.as_array().unwrap().iter().find(|x| x["id"] == job).unwrap().clone();
+    assert_eq!(j["finished"], true);
+    assert_eq!(j["done"], j["total"], "progress reaches the end: {j}");
+    // one undo step
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.transcripts.is_empty());
+    assert_eq!(s.revision, rev + 2);
+
+    // wait: true stores before returning
+    s.execute("transcript.generate", json!({"items": [item.0], "background": true, "wait": true})).unwrap();
+    assert!(s.transcribe_jobs.is_empty());
+    assert_eq!(s.project.transcripts[&item].words.len(), 6);
+}
+
+/// Reports progress until it is cancelled (or 10 s pass).
+struct SlowTranscriber;
+
+impl filmcraft_speech::Transcriber for SlowTranscriber {
+    fn id(&self) -> String {
+        "slow".into()
+    }
+    fn transcribe(
+        &self,
+        _: &[f32],
+        _: &filmcraft_speech::Options,
+        progress: filmcraft_speech::ProgressFn,
+    ) -> Result<Transcript, filmcraft_speech::SpeechError> {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs() < 10 {
+            if !progress(0.5, "Transcribing") {
+                return Err(filmcraft_speech::SpeechError::Cancelled);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(Transcript::default())
+    }
+}
+
+#[test]
+fn cancelled_background_generate_changes_nothing() {
+    let (mut s, item, _) = session();
+    s.transcriber = Some(Arc::new(SlowTranscriber));
+    let rev = s.revision;
+    let r = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap();
+    let e = s.execute("transcript.generate", json!({"items": [item.0], "background": true})).unwrap_err();
+    assert!(e.to_string().contains("already running"), "{e}");
+    s.execute("jobs.cancel", json!({"job": r["job"]})).unwrap();
+    drain(&mut s);
+    assert_eq!(s.revision, rev);
+    assert!(s.project.transcripts.is_empty());
+}
