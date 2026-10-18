@@ -14,7 +14,8 @@
 //!
 //! Everything it makes is ordinary clips (colour mattes, graphic clips, narration clips, captions,
 //! transitions), built with the same commands the UI uses, so the result is edited like any other
-//! sequence. A scene lasts `seconds`, or as long as its narration plus a short pause.
+//! sequence. A scene lasts `seconds`, or as long as its narration plus a short pause. Without a
+//! `voice`, narrations use a natural voice when those are downloaded, else the basic voice.
 //!
 //! A background may later be `{"generate": "<prompt>"}` (footage from a video model); this build
 //! has no generator and says so.
@@ -181,6 +182,15 @@ fn validate(p: &Plan) -> Result<()> {
     Ok(())
 }
 
+/// The narrator when the plan names none and the natural voices are downloaded.
+const NATURAL_VOICE: &str = "kokoro-heart";
+
+/// This build has the natural voices (Kokoro) and they are downloaded, so narrations need not use
+/// the basic voice.
+fn natural_voices() -> bool {
+    cfg!(feature = "neural-voices") && crate::transcript::models_dir().is_some_and(|d| filmcraft_tts::catalog::installed(&d))
+}
+
 fn ticks(secs: f64) -> Tick {
     Tick((secs * TICKS_PER_SECOND as f64).round() as i64)
 }
@@ -284,8 +294,10 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             let mut speech = 0.0;
             if let Some(text) = sc.narration.as_deref().filter(|x| !x.trim().is_empty()) {
                 let mut q = json!({"text": text, "time": t.0, "track": "A1"});
-                if let Some(v) = sc.voice.as_ref().or(plan.voice.as_ref()) {
-                    q["voice"] = json!(v);
+                match sc.voice.as_ref().or(plan.voice.as_ref()) {
+                    Some(v) => q["voice"] = json!(v),
+                    None if natural_voices() => q["voice"] = json!(NATURAL_VOICE),
+                    None => {}
                 }
                 if let Some(pace) = plan.pace {
                     q["pace"] = json!(pace);
