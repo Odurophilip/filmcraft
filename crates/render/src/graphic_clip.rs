@@ -364,7 +364,20 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
     if let Some(p) = &shape {
         fill_into(p, &mut cover, -x0 as f32, -y0 as f32);
     }
-    let strokes: Vec<(Mask, [f32; 4])> = ap.strokes.iter().map(|(c, sw, k)| (mask::stroke(&cover, sw * s, stroke_kind(*k)), *c)).collect();
+    // an outer stroke covers the shape too (the fill is drawn over it); with no fill it is only
+    // the ring outside the shape, so an outline-only shape or text stays hollow
+    let hollow = ap.fill.is_none() && ap.gradient.is_none();
+    let strokes: Vec<(Mask, [f32; 4])> = ap
+        .strokes
+        .iter()
+        .map(|(c, sw, k)| {
+            let mut sm = mask::stroke(&cover, sw * s, stroke_kind(*k));
+            if hollow && stroke_kind(*k) == StrokeKind::Outer {
+                sm.a.iter_mut().zip(&cover.a).for_each(|(v, c)| *v = (*v - c).max(0.0));
+            }
+            (sm, *c)
+        })
+        .collect();
     let bg = ap.background.map(|(c, pad, r)| {
         let p = filmcraft_text::Path::round_rect(lb[0] - pad, lb[1] - pad, lb[2] + pad, lb[3] + pad, r).transformed(m);
         let mut bm = Mask::new(w, h);
@@ -771,6 +784,21 @@ mod tests {
         assert!((98..=106).contains(&minx), "starts at the position: {minx}");
         assert!((145..=152).contains(&maxy), "sits on the baseline: {maxy}");
         assert!(img.get(ink[0].0, ink[0].1)[0] > 0.4, "white");
+    }
+
+    #[test]
+    fn outline_only_shape_is_hollow() {
+        let mut e = new_shape_layer(0, Vec2::new(100.0, 100.0), Vec2::new(80.0, 40.0), vec![]);
+        set(&mut e, "fill", ParamValue::Bool(false));
+        set(&mut e, "stroke", ParamValue::Bool(true));
+        set(&mut e, "stroke_width", ParamValue::Float(6.0));
+        set(&mut e, "stroke_color", ParamValue::Color([1.0, 0.0, 0.0, 1.0]));
+        let mut img = Image::new(200, 200);
+        render_graphic_layers(&[e], Tick::ZERO, (200, 200), &Affine::IDENTITY, &mut img);
+        let centre = img.px[(100 * 200 + 100) * 4 + 3];
+        let ring = img.px[(100 * 200 + 57) * 4 + 3];
+        assert!(centre < 0.01, "no fill inside the outline: alpha {centre}");
+        assert!(ring > 0.9, "the outline itself is drawn: alpha {ring}");
     }
 
     #[test]

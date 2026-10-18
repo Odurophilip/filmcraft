@@ -1027,15 +1027,21 @@ fn dotted_abbreviation(lower: &str, rest: &str, used: usize) -> Option<(Vec<Toke
 /// All-caps, 2–5 ASCII letters that are not pronounceable → spell it out.
 /// "Pronounceable" here: no consonant cluster of 3+, and no leading cluster of 2+
 /// before the first vowel (TDA, NBC, FBI, HTML are spelled; NASA, UNESCO stay words).
-/// A small allowlist of known pronounceable acronyms is kept as words regardless.
+/// A small allowlist of known pronounceable acronyms is kept as words regardless, and a few
+/// common ones that look pronounceable but are always said letter by letter (AI, API, URL) are
+/// always spelled.
 fn is_spellable_acronym(word: &str) -> bool {
     const KEEP_AS_WORDS: [&str; 8] = ["NASA", "UNESCO", "NATO", "UNICEF", "OPEC", "FIFA", "RADAR", "SONAR"];
+    const ALWAYS_SPELL: [&str; 14] = ["AI", "API", "UI", "UX", "URL", "IDE", "AWS", "CEO", "CTO", "CFO", "EU", "UK", "USA", "IO"];
     let letters: Vec<char> = word.chars().collect();
     if letters.len() < 2 || letters.len() > 5 || !letters.iter().all(|c| c.is_ascii_uppercase()) {
         return false;
     }
     if KEEP_AS_WORDS.contains(&word) {
         return false;
+    }
+    if ALWAYS_SPELL.contains(&word) {
+        return true;
     }
     if !letters.iter().any(|c| is_vowel(*c)) {
         return true;
@@ -1369,6 +1375,11 @@ mod tests {
         assert_eq!(words("UNESCO", Lang::EnUs), "UNESCO");
         assert_eq!(words("laser", Lang::EnUs), "laser");
         assert_eq!(words("A", Lang::EnUs), "A");
+        // pronounceable letters, but said letter by letter
+        assert_eq!(words("AI", Lang::EnUs), "A I");
+        assert_eq!(words("an AI tutor", Lang::EnUs), "an A I tutor");
+        assert_eq!(words("API", Lang::EnUs), "A P I");
+        assert_eq!(words("URL", Lang::EnUs), "U R L");
     }
 
     #[test]

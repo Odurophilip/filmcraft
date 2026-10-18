@@ -32,7 +32,8 @@ fn builds_an_editable_sequence_in_one_undo_step() {
 
     let q = s.active_sequence().unwrap();
     assert_eq!(q.video_tracks[0].items.len(), 3, "a background per scene on V1");
-    assert_eq!(q.video_tracks[1].items.len(), 3, "a text clip per scene on V2");
+    assert_eq!(q.video_tracks[2].items.len(), 3, "a title per scene on V3");
+    assert_eq!(q.video_tracks[3].items.len(), 1, "the one body line on V4");
     assert_eq!(q.audio_tracks[0].items.len(), 2, "narrations on A1");
     assert_eq!(q.duration().0, r["duration"].as_i64().unwrap());
     // scenes are back to back
@@ -90,4 +91,44 @@ fn top_layout_caption_text_and_zoom() {
         let e = s.execute("storyboard.build", json!({"scenes": [bad]})).unwrap_err().to_string();
         assert!(e.contains(want), "{e}");
     }
+}
+
+#[test]
+fn pictures_highlights_and_per_scene_transitions() {
+    let dir = std::env::temp_dir().join(format!("fc-storyboard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("shot.png");
+    // a 1×1 PNG is enough to import and place
+    std::fs::write(
+        &png,
+        [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4,
+            0x89, 0, 0, 0, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0,
+            0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ],
+    )
+    .unwrap();
+    let mut s = Session::default();
+    s.execute("file.newProject", json!({"name": "T"})).unwrap();
+    let shot = png.to_string_lossy();
+    let r = s
+        .execute(
+            "storyboard.build",
+            json!({"style": {"accent": "#c96442"}, "scenes": [
+                {"title": "One", "seconds": 3},
+                {"title": "Two", "body": "later", "layout": "top", "seconds": 4, "transition": "push",
+                 "image": {"media": shot, "enter": "slideUp"},
+                 "highlights": [{"x": 100, "y": 100, "w": 200, "h": 80, "at": 1.0}]}
+            ]}),
+        )
+        .unwrap();
+    assert!(r["warnings"].as_array().unwrap().is_empty(), "{}", r["warnings"]);
+    assert!(r["scenes"][1]["image"].as_u64().is_some());
+    let q = s.active_sequence().unwrap();
+    assert_eq!(q.video_tracks[1].items.len(), 1, "the picture on V2");
+    assert_eq!(q.video_tracks[4].items.len(), 1, "the highlight ring on V5");
+    let ring = &q.video_tracks[4].items[0];
+    assert!(ring.start.0 > q.video_tracks[0].items[1].start.0, "the ring comes in after the scene starts");
+    let e = s.execute("storyboard.build", json!({"scenes": [{"image": {"media": "/nope.png"}}]})).unwrap_err().to_string();
+    assert!(e.contains("no such image"), "{e}");
 }

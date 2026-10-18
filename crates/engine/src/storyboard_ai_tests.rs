@@ -66,7 +66,7 @@ fn builds_the_video_from_a_prompt() {
     }
     let q = s.active_sequence().expect("a new sequence");
     assert_eq!((q.settings.width, q.settings.height), (1080, 1920), "the user's format wins");
-    assert_eq!(q.video_tracks[1].items.len(), 2);
+    assert_eq!(q.video_tracks[2].items.len(), 2);
     assert!(q.caption_tracks.is_empty(), "the user's captions choice wins");
     assert!(seen.lock().unwrap()["messages"][0]["content"].as_str().unwrap().contains("coffee tips"));
 

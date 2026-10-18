@@ -36,6 +36,8 @@ const MIN_SCENE: f64 = 1.0;
 const DEFAULT_SCENE: f64 = 4.0;
 /// Fade of the scene text in and out.
 const TEXT_FADE: f64 = 0.4;
+/// The body text follows the title by this much.
+const TEXT_STAGGER: f64 = 0.3;
 /// Words per caption (tall frames: [`CAPTION_WORDS_TALL`]).
 const CAPTION_WORDS: usize = 7;
 const CAPTION_WORDS_TALL: usize = 4;
@@ -72,6 +74,8 @@ struct Style {
     body_color: Option<String>,
     /// Default background colour for scenes that give none.
     background: Option<String>,
+    /// Highlight ring colour (default: the title colour).
+    accent: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -90,6 +94,38 @@ struct Scene {
     /// Caption text when it should read differently from what the voice says (a name spelled
     /// for the voice, "dot io" for ".io"); default: the narration.
     caption: Option<String>,
+    /// A picture over the background (a screenshot, a product shot) that animates in.
+    image: Option<Image>,
+    /// Rings that draw the eye to parts of the picture.
+    highlights: Vec<Highlight>,
+    /// The transition into this scene (default: the plan's).
+    transition: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Image {
+    /// An image or video file, as big as the frame (transparent PNGs keep their shadows).
+    media: String,
+    /// "slideUp" (default), "fade", "pop", "none".
+    enter: Option<String>,
+    /// Slow push-in after the entrance: the scale it ends at, in percent (default 103).
+    zoom: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Highlight {
+    /// The ringed area in frame pixels (top-left, size), where it sits once the picture settles.
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    /// Seconds into the scene (default 1.5).
+    at: Option<f64>,
+    /// How long it stays (default: to the end of the scene).
+    seconds: Option<f64>,
+    color: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +147,8 @@ struct BackgroundSpec {
     generate: Option<String>,
     /// Slow push-in on media: the scale it ends at, in percent (default 105; 100 = still).
     zoom: Option<f64>,
+    /// `media` is the first frame of a numbered image sequence (an animation rendered to PNGs).
+    sequence: bool,
 }
 
 fn is_hex_color(c: &str) -> bool {
@@ -144,7 +182,7 @@ fn validate(p: &Plan) -> Result<()> {
     {
         return Err(bad(CMD, "`fps` must be 1 to 120"));
     }
-    for c in [&p.style.title_color, &p.style.body_color, &p.style.background].into_iter().flatten() {
+    for c in [&p.style.title_color, &p.style.body_color, &p.style.background, &p.style.accent].into_iter().flatten() {
         if !is_hex_color(c) {
             return Err(bad(CMD, format!("`{c}` is not a #rrggbb colour")));
         }
@@ -165,6 +203,31 @@ fn validate(p: &Plan) -> Result<()> {
             && !["center", "top"].contains(&l.as_str())
         {
             return Err(bad(CMD, format!("scene {n}: unknown `layout` `{l}` (center, top)")));
+        }
+        if let Some(img) = &sc.image {
+            if !std::path::Path::new(&img.media).is_file() {
+                return Err(bad(CMD, format!("scene {n}: no such image file `{}`", img.media)));
+            }
+            if let Some(e) = &img.enter
+                && !["slideUp", "fade", "pop", "none"].contains(&e.as_str())
+            {
+                return Err(bad(CMD, format!("scene {n}: unknown image `enter` `{e}` (slideUp, fade, pop, none)")));
+            }
+            if let Some(z) = img.zoom
+                && !(100.0..=150.0).contains(&z)
+            {
+                return Err(bad(CMD, format!("scene {n}: image `zoom` must be 100 to 150")));
+            }
+        }
+        for hl in &sc.highlights {
+            if hl.w <= 0.0 || hl.h <= 0.0 {
+                return Err(bad(CMD, format!("scene {n}: a highlight needs a positive `w` and `h`")));
+            }
+            if let Some(c) = &hl.color
+                && !is_hex_color(c)
+            {
+                return Err(bad(CMD, format!("scene {n}: `{c}` is not a #rrggbb colour")));
+            }
         }
         match &sc.background {
             Some(Background::Color(c)) if !is_hex_color(c) => return Err(bad(CMD, format!("scene {n}: `{c}` is not a #rrggbb colour"))),
@@ -238,39 +301,89 @@ fn caption_chunks(text: &str, speech: f64, per: usize) -> Vec<(String, f64, f64)
         .collect()
 }
 
-/// Keyframe the scene text's entrance and exit on graphic clip `clip` (starting at `start`,
-/// `dur` long).
+/// Motion keys per eased move: enough that the straight segments between them read as a curve.
+const EASE_KEYS: usize = 7;
+
+fn lerp(a: &Value, b: &Value, k: f64) -> Value {
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) => Value::Array(x.iter().zip(y).map(|(p, q)| lerp(p, q, k)).collect()),
+        _ => json!(a.as_f64().unwrap_or(0.0) + (b.as_f64().unwrap_or(0.0) - a.as_f64().unwrap_or(0.0)) * k),
+    }
+}
+
+/// Keyframe `param` of `effect` on `clip` from `from` to `to` between `t0` and `t0 + len`, easing
+/// out (fast, then settling), as a few keys a frame or more apart.
+fn ease(s: &mut Session, clip: u64, effect: &str, param: &str, (from, to): (Value, Value), t0: Tick, len: Tick) -> Result<()> {
+    let n = EASE_KEYS.min((len.0 / ticks(1.0 / 30.0).0.max(1)).max(1) as usize);
+    for i in 0..=n {
+        let x = i as f64 / n as f64;
+        let k = 1.0 - (1.0 - x).powi(3);
+        let at = t0 + Tick((len.0 as f64 * x).round() as i64);
+        s.execute("effects.setParam", json!({"clip": clip, "effect": effect, "param": param, "value": lerp(&from, &to, k), "time": at.0, "keyframe": true}))?;
+    }
+    Ok(())
+}
+
+fn key(s: &mut Session, clip: u64, effect: &str, param: &str, t: Tick, value: Value) -> Result<()> {
+    s.execute("effects.setParam", json!({"clip": clip, "effect": effect, "param": param, "value": value, "time": t.0, "keyframe": true})).map(|_| ())
+}
+
+/// Keyframe a text clip's entrance and exit (starting at `start`, `dur` long).
 fn animate(s: &mut Session, clip: u64, start: Tick, dur: Tick, kind: &str, (w, h): (u32, u32)) -> Result<()> {
     if kind == "none" {
         return Ok(());
     }
     let fade = ticks(TEXT_FADE.min(secs(dur) / 4.0));
     let end = start + dur;
-    let key = |s: &mut Session, effect: &str, param: &str, t: Tick, value: Value| {
-        s.execute("effects.setParam", json!({"clip": clip, "effect": effect, "param": param, "value": value, "time": t.0, "keyframe": true})).map(|_| ())
-    };
-    key(s, "opacity", "opacity", start, json!(0.0))?;
-    key(s, "opacity", "opacity", start + fade, json!(100.0))?;
-    key(s, "opacity", "opacity", end - fade, json!(100.0))?;
-    key(s, "opacity", "opacity", end, json!(0.0))?;
-    let centre = [w as f64 / 2.0, h as f64 / 2.0];
-    let settle = start + ticks((TEXT_FADE * 2.0).min(secs(dur) / 3.0));
+    key(s, clip, "opacity", "opacity", start, json!(0.0))?;
+    key(s, clip, "opacity", "opacity", start + fade, json!(100.0))?;
+    key(s, clip, "opacity", "opacity", end - fade, json!(100.0))?;
+    key(s, clip, "opacity", "opacity", end, json!(0.0))?;
+    let centre = json!([w as f64 / 2.0, h as f64 / 2.0]);
+    let settle = ticks((TEXT_FADE * 2.0).min(secs(dur) / 3.0));
     match kind {
-        "fadeUp" => {
-            key(s, "motion", "position", start, json!([centre[0], centre[1] + h as f64 * 0.04]))?;
-            key(s, "motion", "position", settle, json!(centre))?;
-        }
-        "slideLeft" => {
-            key(s, "motion", "position", start, json!([centre[0] + w as f64 * 0.08, centre[1]]))?;
-            key(s, "motion", "position", settle, json!(centre))?;
+        "fadeUp" => ease(s, clip, "motion", "position", (json!([w as f64 / 2.0, h as f64 / 2.0 + h as f64 * 0.04]), centre), start, settle),
+        "slideLeft" => ease(s, clip, "motion", "position", (json!([w as f64 / 2.0 + w as f64 * 0.08, h as f64 / 2.0]), centre), start, settle),
+        "pop" => ease(s, clip, "motion", "scale", (json!(80.0), json!(100.0)), start, settle),
+        _ => Ok(()),
+    }
+}
+
+/// How long a picture takes to slide or pop in.
+const IMAGE_ENTER: f64 = 0.9;
+
+/// Animate a scene picture in, then push in slowly to `zoom` by the scene's end.
+fn animate_image(s: &mut Session, clip: u64, start: Tick, dur: Tick, enter: &str, zoom: f64, (w, h): (u32, u32)) -> Result<()> {
+    let len = ticks(IMAGE_ENTER.min(secs(dur) / 3.0));
+    let centre = json!([w as f64 / 2.0, h as f64 / 2.0]);
+    match enter {
+        "slideUp" => {
+            ease(s, clip, "motion", "position", (json!([w as f64 / 2.0, h as f64 * 0.95]), centre), start, len)?;
+            key(s, clip, "opacity", "opacity", start, json!(0.0))?;
+            key(s, clip, "opacity", "opacity", start + Tick(len.0 / 3), json!(100.0))?;
         }
         "pop" => {
-            key(s, "motion", "scale", start, json!(80.0))?;
-            key(s, "motion", "scale", settle, json!(100.0))?;
+            ease(s, clip, "motion", "scale", (json!(88.0), json!(100.0)), start, len)?;
+            key(s, clip, "opacity", "opacity", start, json!(0.0))?;
+            key(s, clip, "opacity", "opacity", start + Tick(len.0 / 3), json!(100.0))?;
+        }
+        "fade" => {
+            key(s, clip, "opacity", "opacity", start, json!(0.0))?;
+            key(s, clip, "opacity", "opacity", start + len, json!(100.0))?;
         }
         _ => {}
     }
+    if zoom > 100.0 && enter != "pop" {
+        key(s, clip, "motion", "scale", start + len, json!(100.0))?;
+        key(s, clip, "motion", "scale", start + dur, json!(zoom))?;
+    }
     Ok(())
+}
+
+/// The picture's scale at `t` into a scene (its push-in after the entrance).
+fn zoom_at(t: f64, dur: f64, zoom: f64) -> f64 {
+    let a = IMAGE_ENTER.min(dur / 3.0);
+    if t <= a || dur <= a { 1.0 } else { 1.0 + (zoom / 100.0 - 1.0) * ((t - a) / (dur - a)).min(1.0) }
 }
 
 fn build(s: &mut Session, p: &Value) -> Result<Value> {
@@ -281,7 +394,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
     let name = plan.name.clone().unwrap_or_else(|| "Storyboard".into());
     let fps = plan.fps.unwrap_or(30.0);
     s.edit_group("Build Video from Storyboard", |s| {
-        let r = s.execute("file.newSequence", json!({"name": name, "width": w, "height": h, "fps": fps, "video": 3, "audio": 2}))?;
+        let r = s.execute("file.newSequence", json!({"name": name, "width": w, "height": h, "fps": fps, "video": 5, "audio": 2}))?;
         let sequence = id_of(&r, "sequence")?;
         let rate = s.active_sequence().ok_or(EngineError::NoSequence)?.settings.frame_rate;
         let snap = |t: Tick| {
@@ -304,7 +417,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
         let (box_w, box_x) = (w as f64 * 0.84, w as f64 * 0.08);
         let mut t = Tick::ZERO;
         let mut report = Vec::new();
-        let mut backgrounds = Vec::new();
+        let mut backgrounds: Vec<(Option<u64>, Option<&str>)> = Vec::new();
         for sc in &plan.scenes {
             // narration first: it sets the scene's length
             let mut narration = None;
@@ -328,14 +441,14 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             let seconds = secs(dur);
 
             // background on V1
-            let (color, media, keep_audio, zoom) = match &sc.background {
-                Some(Background::Color(c)) => (Some(c.clone()), None, false, 100.0),
-                Some(Background::Spec(b)) => (b.color.clone(), b.media.clone(), b.audio, b.zoom.unwrap_or(105.0)),
-                None => (None, None, false, 100.0),
+            let (color, media, keep_audio, zoom, sequence) = match &sc.background {
+                Some(Background::Color(c)) => (Some(c.clone()), None, false, 100.0, false),
+                Some(Background::Spec(b)) => (b.color.clone(), b.media.clone(), b.audio, b.zoom.unwrap_or(if b.sequence { 100.0 } else { 105.0 }), b.sequence),
+                None => (None, None, false, 100.0, false),
             };
             let bg = match media {
                 Some(path) => {
-                    let r = s.execute("file.import", json!({"paths": [path]}))?;
+                    let r = s.execute("file.import", json!({"paths": [path], "imageSequence": sequence}))?;
                     let item = r["items"][0].as_u64().ok_or_else(|| EngineError::Other(format!("{CMD}: could not import `{path}`")))?;
                     let r = s.execute(
                         "timeline.place",
@@ -363,7 +476,20 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                     r["clips"][0].as_u64().or_else(|| r["clip"].as_u64())
                 }
             };
-            backgrounds.extend(bg);
+            backgrounds.push((bg, sc.transition.as_deref()));
+
+            // the picture on V2: slides in over the background, then drifts
+            let mut image = None;
+            let image_zoom = sc.image.as_ref().map_or(100.0, |i| i.zoom.unwrap_or(103.0));
+            if let Some(img) = &sc.image {
+                let r = s.execute("file.import", json!({"paths": [img.media]}))?;
+                let item = r["items"][0].as_u64().ok_or_else(|| EngineError::Other(format!("{CMD}: could not import `{}`", img.media)))?;
+                let r = s.execute("timeline.place", json!({"item": item, "track": "V2", "time": t.0, "duration": dur.0, "audio": false}))?;
+                if let Some(c) = r["clips"][0].as_u64().or_else(|| r["clip"].as_u64()) {
+                    animate_image(s, c, t, dur, img.enter.as_deref().unwrap_or("slideUp"), image_zoom, (w, h))?;
+                    image = Some(c);
+                }
+            }
 
             // title and body: one graphic clip on V2, text wrapped in a centred box
             let mut text_clip = None;
@@ -397,22 +523,44 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                 if k == 0 {
                     q["fontStyle"] = json!("Bold");
                 }
-                match text_clip {
-                    Some(c) => q["clip"] = json!(c),
-                    None => {
-                        q["seconds"] = json!(seconds);
-                        q["time"] = json!(t.0);
-                        q["track"] = json!(1);
-                    }
-                }
+                // the title on V3, the body on V4 a beat later
+                let delay = if k == 0 { Tick::ZERO } else { ticks(TEXT_STAGGER.min(seconds / 6.0)) };
+                q["seconds"] = json!(seconds);
+                q["time"] = json!(t.0);
+                q["track"] = json!(2 + k);
                 let r = s.execute("graphics.newText", q)?;
                 let clip = id_of(&r, "clip")?;
                 let layer = r["layer"].as_u64().unwrap_or(0);
                 s.execute("graphics.set", json!({"clip": clip, "layer": layer, "props": {"fill_color": color, "align": "center"}}))?;
-                text_clip = Some(clip);
+                animate(s, clip, t + delay, dur - delay, sc.animation.as_deref().unwrap_or("fadeUp"), (w, h))?;
+                text_clip.get_or_insert(clip);
             }
-            if let Some(c) = text_clip {
-                animate(s, c, t, dur, sc.animation.as_deref().unwrap_or("fadeUp"), (w, h))?;
+
+            // highlight rings on V5, placed where the picture is at that moment
+            let accent = plan.style.accent.as_deref().or(plan.style.title_color.as_deref()).unwrap_or("#ffffff");
+            for hl in &sc.highlights {
+                let at = hl.at.unwrap_or(1.5).clamp(0.0, (seconds - 0.5).max(0.0));
+                let len = hl.seconds.unwrap_or(seconds - at).clamp(0.5, seconds - at);
+                let z = zoom_at(at, seconds, image_zoom);
+                let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+                let pad = 10.0;
+                let centre = [cx + (hl.x + hl.w / 2.0 - cx) * z, cy + (hl.y + hl.h / 2.0 - cy) * z];
+                let size = [(hl.w + pad * 2.0) * z, (hl.h + pad * 2.0) * z];
+                let start = snap(t + ticks(at));
+                let r = s.execute("graphics.newRectangle", json!({"position": centre, "size": size, "seconds": len, "time": start.0, "track": 4}))?;
+                let ring = id_of(&r, "clip")?;
+                let color = hl.color.as_deref().unwrap_or(accent);
+                s.execute(
+                    "graphics.set",
+                    json!({"clip": ring, "layer": 0, "props": {"fill": false, "stroke": true, "stroke_color": color, "stroke_width": 6, "corner_radius": 18}}),
+                )?;
+                let pop = ticks(0.35);
+                ease(s, ring, "motion", "scale", (json!(125.0), json!(100.0)), start, pop)?;
+                let end = start + ticks(len);
+                key(s, ring, "opacity", "opacity", start, json!(0.0))?;
+                key(s, ring, "opacity", "opacity", start + pop, json!(100.0))?;
+                key(s, ring, "opacity", "opacity", end - ticks(0.25), json!(100.0))?;
+                key(s, ring, "opacity", "opacity", end, json!(0.0))?;
             }
 
             // captions from the narration
@@ -431,20 +579,23 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
             report.push(
-                json!({"start": t.0, "duration": dur.0, "seconds": seconds, "background": bg, "text": text_clip, "narration": narration, "captions": captions}),
+                json!({"start": t.0, "duration": dur.0, "seconds": seconds, "background": bg, "image": image, "text": text_clip, "narration": narration, "captions": captions}),
             );
             t += dur;
         }
 
         // transitions between scene backgrounds
-        let transition = plan.transition.as_deref().unwrap_or("cross_dissolve");
         let mut warnings = Vec::new();
-        if transition != "none" {
-            let frames = ((plan.transition_seconds.unwrap_or(0.5).clamp(0.0, 5.0)) * fps).round().max(1.0) as i64;
-            for c in backgrounds.iter().skip(1) {
-                if let Err(e) = s.execute("sequence.applyVideoTransition", json!({"clip": c, "effect": transition, "frames": frames, "edge": "in"})) {
-                    warnings.push(format!("transition: {e}"));
-                }
+        let frames = ((plan.transition_seconds.unwrap_or(0.5).clamp(0.0, 5.0)) * fps).round().max(1.0) as i64;
+        for (c, own) in backgrounds.iter().skip(1) {
+            let transition = own.or(plan.transition.as_deref()).unwrap_or("cross_dissolve");
+            if transition == "none" {
+                continue;
+            }
+            if let Some(c) = c
+                && let Err(e) = s.execute("sequence.applyVideoTransition", json!({"clip": c, "effect": transition, "frames": frames, "edge": "in"}))
+            {
+                warnings.push(format!("transition: {e}"));
             }
         }
 
@@ -469,7 +620,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?}]?,"transition":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,
