@@ -131,6 +131,9 @@ struct Highlight {
     /// Move in on the ringed area so it can be read on a phone (default true when the scene
     /// has a picture); the title steps aside while the camera is in close.
     zoom: Option<bool>,
+    /// Draw the ring (default true); false moves the camera only, for pictures that animate the
+    /// highlighted part themselves.
+    ring: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -612,6 +615,9 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                         (at, len, [cx + (region[0] - cx) * z, cy + (region[1] - cy) * z], [rw * z, rh * z])
                     }
                 };
+                if !hl.ring.unwrap_or(true) {
+                    continue;
+                }
                 let start = snap(t + ticks(ring_at));
                 let r = s.execute("graphics.newRectangle", json!({"position": centre, "size": size, "seconds": ring_len, "time": start.0, "track": 4}))?;
                 let ring = id_of(&r, "clip")?;
@@ -686,7 +692,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true,"ring":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,
