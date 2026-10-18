@@ -123,9 +123,12 @@ struct Highlight {
     h: f64,
     /// Seconds into the scene (default 1.5).
     at: Option<f64>,
-    /// How long it stays (default: to the end of the scene).
+    /// How long it stays (default: to the end of the scene, or until the next highlight).
     seconds: Option<f64>,
     color: Option<String>,
+    /// Move in on the ringed area so it can be read on a phone (default true when the scene
+    /// has a picture); the title steps aside while the camera is in close.
+    zoom: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,10 +355,15 @@ fn animate(s: &mut Session, clip: u64, start: Tick, dur: Tick, kind: &str, (w, h
 /// How long a picture takes to slide or pop in.
 const IMAGE_ENTER: f64 = 0.9;
 
-/// Animate a scene picture in, then push in slowly to `zoom` by the scene's end.
-fn animate_image(s: &mut Session, clip: u64, start: Tick, dur: Tick, enter: &str, zoom: f64, (w, h): (u32, u32)) -> Result<()> {
+/// Animate a scene picture in (shown at `base` percent, so pictures bigger than the frame fit),
+/// then push in slowly to `zoom` by the scene's end when `drift`.
+#[allow(clippy::too_many_arguments)]
+fn animate_image(s: &mut Session, clip: u64, start: Tick, dur: Tick, enter: &str, (base, zoom, drift): (f64, f64, bool), (w, h): (u32, u32)) -> Result<()> {
     let len = ticks(IMAGE_ENTER.min(secs(dur) / 3.0));
     let centre = json!([w as f64 / 2.0, h as f64 / 2.0]);
+    if (base - 100.0).abs() > 1e-6 {
+        key(s, clip, "motion", "scale", start, json!(base))?;
+    }
     match enter {
         "slideUp" => {
             ease(s, clip, "motion", "position", (json!([w as f64 / 2.0, h as f64 * 0.95]), centre), start, len)?;
@@ -363,7 +371,7 @@ fn animate_image(s: &mut Session, clip: u64, start: Tick, dur: Tick, enter: &str
             key(s, clip, "opacity", "opacity", start + Tick(len.0 / 3), json!(100.0))?;
         }
         "pop" => {
-            ease(s, clip, "motion", "scale", (json!(88.0), json!(100.0)), start, len)?;
+            ease(s, clip, "motion", "scale", (json!(base * 0.88), json!(base)), start, len)?;
             key(s, clip, "opacity", "opacity", start, json!(0.0))?;
             key(s, clip, "opacity", "opacity", start + Tick(len.0 / 3), json!(100.0))?;
         }
@@ -373,12 +381,19 @@ fn animate_image(s: &mut Session, clip: u64, start: Tick, dur: Tick, enter: &str
         }
         _ => {}
     }
-    if zoom > 100.0 && enter != "pop" {
-        key(s, clip, "motion", "scale", start + len, json!(100.0))?;
-        key(s, clip, "motion", "scale", start + dur, json!(zoom))?;
+    if drift && zoom > 100.0 && enter != "pop" {
+        key(s, clip, "motion", "scale", start + len, json!(base))?;
+        key(s, clip, "motion", "scale", start + dur, json!(base * zoom / 100.0))?;
     }
     Ok(())
 }
+
+/// Camera moves for highlights: how long moving in and out take, the closest it gets, and the
+/// room the ringed area may fill (frame pixels; the captions keep the bottom).
+const ZOOM_IN: f64 = 0.7;
+const ZOOM_OUT: f64 = 0.6;
+const MAX_ZOOM: f64 = 2.8;
+const ZOOM_ROOM: (f64, f64) = (0.78, 0.6);
 
 /// The picture's scale at `t` into a scene (its push-in after the entrance).
 fn zoom_at(t: f64, dur: f64, zoom: f64) -> f64 {
@@ -481,18 +496,25 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             // the picture on V2: slides in over the background, then drifts
             let mut image = None;
             let image_zoom = sc.image.as_ref().map_or(100.0, |i| i.zoom.unwrap_or(103.0));
+            let camera = sc.image.is_some() && sc.highlights.iter().any(|hl| hl.zoom.unwrap_or(true));
+            let mut base = 100.0;
             if let Some(img) = &sc.image {
                 let r = s.execute("file.import", json!({"paths": [img.media]}))?;
                 let item = r["items"][0].as_u64().ok_or_else(|| EngineError::Other(format!("{CMD}: could not import `{}`", img.media)))?;
+                // a picture bigger than the frame (a 2× render, sharp when the camera moves in) fits it
+                if let Some((iw, ih)) = s.source(filmcraft_project::ItemId(item)).and_then(|src| src.info().video.as_ref().map(|v| (v.width, v.height))) {
+                    base = 100.0 * (w as f64 / iw.max(1) as f64).min(h as f64 / ih.max(1) as f64).min(1.0);
+                }
                 let r = s.execute("timeline.place", json!({"item": item, "track": "V2", "time": t.0, "duration": dur.0, "audio": false}))?;
                 if let Some(c) = r["clips"][0].as_u64().or_else(|| r["clip"].as_u64()) {
-                    animate_image(s, c, t, dur, img.enter.as_deref().unwrap_or("slideUp"), image_zoom, (w, h))?;
+                    animate_image(s, c, t, dur, img.enter.as_deref().unwrap_or("slideUp"), (base, image_zoom, !camera), (w, h))?;
                     image = Some(c);
                 }
             }
 
             // title and body: one graphic clip on V2, text wrapped in a centred box
             let mut text_clip = None;
+            let mut text_clips = Vec::new();
             let title = sc.title.as_deref().filter(|x| !x.trim().is_empty());
             let body = sc.body.as_deref().filter(|x| !x.trim().is_empty());
             let top_layout = sc.layout.as_deref() == Some("top");
@@ -534,32 +556,74 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                 s.execute("graphics.set", json!({"clip": clip, "layer": layer, "props": {"fill_color": color, "align": "center"}}))?;
                 animate(s, clip, t + delay, dur - delay, sc.animation.as_deref().unwrap_or("fadeUp"), (w, h))?;
                 text_clip.get_or_insert(clip);
+                text_clips.push(clip);
             }
 
-            // highlight rings on V5, placed where the picture is at that moment
+            // highlight rings on V5. With a picture the camera moves in on each one, so it reads on a
+            // phone, and the title steps aside meanwhile; otherwise the ring sits where the
+            // picture is at that moment.
             let accent = plan.style.accent.as_deref().or(plan.style.title_color.as_deref()).unwrap_or("#ffffff");
-            for hl in &sc.highlights {
-                let at = hl.at.unwrap_or(1.5).clamp(0.0, (seconds - 0.5).max(0.0));
-                let len = hl.seconds.unwrap_or(seconds - at).clamp(0.5, seconds - at);
-                let z = zoom_at(at, seconds, image_zoom);
-                let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
-                let pad = 10.0;
-                let centre = [cx + (hl.x + hl.w / 2.0 - cx) * z, cy + (hl.y + hl.h / 2.0 - cy) * z];
-                let size = [(hl.w + pad * 2.0) * z, (hl.h + pad * 2.0) * z];
-                let start = snap(t + ticks(at));
-                let r = s.execute("graphics.newRectangle", json!({"position": centre, "size": size, "seconds": len, "time": start.0, "track": 4}))?;
+            let mut order: Vec<&Highlight> = sc.highlights.iter().collect();
+            order.sort_by(|a, b| a.at.unwrap_or(1.5).total_cmp(&b.at.unwrap_or(1.5)));
+            let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+            let pad = 10.0;
+            let entered = IMAGE_ENTER.min(seconds / 3.0) + 0.1;
+            for (i, hl) in order.iter().enumerate() {
+                let next = order.get(i + 1).map_or(seconds, |n| n.at.unwrap_or(1.5));
+                let mut at = hl.at.unwrap_or(1.5).clamp(0.0, (seconds - 0.5).max(0.0));
+                let close_up = match image {
+                    Some(img) if hl.zoom.unwrap_or(true) => {
+                        at = at.max(entered);
+                        let latest = (next - ZOOM_OUT).min(seconds - TEXT_FADE - ZOOM_OUT - 0.1);
+                        let end = hl.seconds.map_or(latest, |d| (at + d).min(latest));
+                        (end >= at + ZOOM_IN + 0.6).then_some((img, end))
+                    }
+                    _ => None,
+                };
+                let (rw, rh) = (hl.w + pad * 2.0, hl.h + pad * 2.0);
+                let region = [hl.x + hl.w / 2.0, hl.y + hl.h / 2.0];
+                let (ring_at, ring_len, centre, size) = match close_up {
+                    Some((img, end)) => {
+                        let z = (w as f64 * ZOOM_ROOM.0 / rw).min(h as f64 * ZOOM_ROOM.1 / rh).clamp(1.0, MAX_ZOOM);
+                        let target = [cx, h as f64 * 0.47];
+                        let moved = json!([target[0] - z * (region[0] - cx), target[1] - z * (region[1] - cy)]);
+                        let (t_in, t_end) = (t + ticks(at), t + ticks(end));
+                        key(s, img, "motion", "scale", t_in, json!(base))?;
+                        key(s, img, "motion", "position", t_in, json!([cx, cy]))?;
+                        ease(s, img, "motion", "scale", (json!(base), json!(base * z)), t_in, ticks(ZOOM_IN))?;
+                        ease(s, img, "motion", "position", (json!([cx, cy]), moved.clone()), t_in, ticks(ZOOM_IN))?;
+                        key(s, img, "motion", "scale", t_end, json!(base * z))?;
+                        key(s, img, "motion", "position", t_end, moved.clone())?;
+                        ease(s, img, "motion", "scale", (json!(base * z), json!(base)), t_end, ticks(ZOOM_OUT))?;
+                        ease(s, img, "motion", "position", (moved, json!([cx, cy])), t_end, ticks(ZOOM_OUT))?;
+                        for &c in &text_clips {
+                            key(s, c, "opacity", "opacity", t_in, json!(100.0))?;
+                            key(s, c, "opacity", "opacity", t_in + ticks(0.35), json!(0.0))?;
+                            key(s, c, "opacity", "opacity", t_end, json!(0.0))?;
+                            key(s, c, "opacity", "opacity", t_end + ticks(ZOOM_OUT), json!(100.0))?;
+                        }
+                        (at + ZOOM_IN, end - at - ZOOM_IN, target, [rw * z, rh * z])
+                    }
+                    None => {
+                        let len = hl.seconds.unwrap_or(seconds - at).clamp(0.5, (seconds - at).max(0.5));
+                        let z = if image.is_some() && !camera { zoom_at(at, seconds, image_zoom) } else { 1.0 };
+                        (at, len, [cx + (region[0] - cx) * z, cy + (region[1] - cy) * z], [rw * z, rh * z])
+                    }
+                };
+                let start = snap(t + ticks(ring_at));
+                let r = s.execute("graphics.newRectangle", json!({"position": centre, "size": size, "seconds": ring_len, "time": start.0, "track": 4}))?;
                 let ring = id_of(&r, "clip")?;
                 let color = hl.color.as_deref().unwrap_or(accent);
                 s.execute(
                     "graphics.set",
-                    json!({"clip": ring, "layer": 0, "props": {"fill": false, "stroke": true, "stroke_color": color, "stroke_width": 6, "corner_radius": 18}}),
+                    json!({"clip": ring, "layer": 0, "props": {"fill": false, "stroke": true, "stroke_color": color, "stroke_width": 7, "corner_radius": 18}}),
                 )?;
                 let pop = ticks(0.35);
-                ease(s, ring, "motion", "scale", (json!(125.0), json!(100.0)), start, pop)?;
-                let end = start + ticks(len);
+                ease(s, ring, "motion", "scale", (json!(118.0), json!(100.0)), start, pop)?;
+                let end = start + ticks(ring_len);
                 key(s, ring, "opacity", "opacity", start, json!(0.0))?;
                 key(s, ring, "opacity", "opacity", start + pop, json!(100.0))?;
-                key(s, ring, "opacity", "opacity", end - ticks(0.25), json!(100.0))?;
+                key(s, ring, "opacity", "opacity", end - ticks(0.2), json!(100.0))?;
                 key(s, ring, "opacity", "opacity", end, json!(0.0))?;
             }
 
@@ -620,7 +684,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?}]?,"transition":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,

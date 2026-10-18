@@ -129,6 +129,12 @@ fn pictures_highlights_and_per_scene_transitions() {
     assert_eq!(q.video_tracks[4].items.len(), 1, "the highlight ring on V5");
     let ring = &q.video_tracks[4].items[0];
     assert!(ring.start.0 > q.video_tracks[0].items[1].start.0, "the ring comes in after the scene starts");
+    // the camera moves in on the highlight: the picture's scale is animated above 100 %
+    let pic = &q.video_tracks[1].items[0];
+    let motion = pic.effects.iter().find(|e| e.effect == "motion").unwrap();
+    let scale = &motion.params["scale"];
+    assert!(!scale.keyframes.is_empty(), "the picture's scale is keyframed");
+    assert!(scale.keyframes.iter().any(|k| k.value.as_f64().is_some_and(|v| v > 100.0)), "it zooms in on the ringed area");
     let e = s.execute("storyboard.build", json!({"scenes": [{"image": {"media": "/nope.png"}}]})).unwrap_err().to_string();
     assert!(e.contains("no such image"), "{e}");
 }
