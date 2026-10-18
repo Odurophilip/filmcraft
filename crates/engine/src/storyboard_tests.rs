@@ -74,3 +74,20 @@ fn vertical_format_and_no_captions() {
     assert_eq!((r["width"].as_u64(), r["height"].as_u64()), (Some(1080), Some(1920)));
     assert!(s.active_sequence().unwrap().caption_tracks.is_empty());
 }
+
+#[test]
+fn top_layout_caption_text_and_zoom() {
+    let mut s = Session::default();
+    s.execute("file.newProject", json!({"name": "T"})).unwrap();
+    let r = s
+        .execute("storyboard.build", json!({"scenes": [{"title": "Hi", "layout": "top", "narration": "Path Axis is here.", "caption": "Pathaxis is here."}]}))
+        .unwrap();
+    let q = s.active_sequence().unwrap();
+    let words: Vec<String> = q.caption_tracks[0].captions.iter().map(|c| c.text.clone()).collect();
+    assert_eq!(words.join(" "), "Pathaxis is here.", "captions read the caption text, not what the voice says");
+    assert!(r["scenes"][0]["text"].as_u64().is_some());
+    for (bad, want) in [(json!({"layout": "side"}), "layout"), (json!({"background": {"color": "#000000", "zoom": 300}}), "zoom")] {
+        let e = s.execute("storyboard.build", json!({"scenes": [bad]})).unwrap_err().to_string();
+        assert!(e.contains(want), "{e}");
+    }
+}

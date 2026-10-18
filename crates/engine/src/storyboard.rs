@@ -85,6 +85,11 @@ struct Scene {
     /// "fadeUp" (default), "fade", "pop", "slideLeft", "none".
     animation: Option<String>,
     voice: Option<String>,
+    /// "center" (default) or "top": the text above a picture (a screenshot in the background).
+    layout: Option<String>,
+    /// Caption text when it should read differently from what the voice says (a name spelled
+    /// for the voice, "dot io" for ".io"); default: the narration.
+    caption: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +109,8 @@ struct BackgroundSpec {
     audio: bool,
     /// Footage to generate from a prompt (not available in this build).
     generate: Option<String>,
+    /// Slow push-in on media: the scale it ends at, in percent (default 105; 100 = still).
+    zoom: Option<f64>,
 }
 
 fn is_hex_color(c: &str) -> bool {
@@ -154,11 +161,21 @@ fn validate(p: &Plan) -> Result<()> {
         {
             return Err(bad(CMD, format!("scene {n}: unknown `animation` `{a}` (fadeUp, fade, pop, slideLeft, none)")));
         }
+        if let Some(l) = &sc.layout
+            && !["center", "top"].contains(&l.as_str())
+        {
+            return Err(bad(CMD, format!("scene {n}: unknown `layout` `{l}` (center, top)")));
+        }
         match &sc.background {
             Some(Background::Color(c)) if !is_hex_color(c) => return Err(bad(CMD, format!("scene {n}: `{c}` is not a #rrggbb colour"))),
             Some(Background::Spec(b)) => {
                 if b.generate.is_some() {
                     return Err(bad(CMD, format!("scene {n}: generated footage is not available in this build; use a colour or a media file")));
+                }
+                if let Some(z) = b.zoom
+                    && !(100.0..=150.0).contains(&z)
+                {
+                    return Err(bad(CMD, format!("scene {n}: `zoom` must be 100 to 150")));
                 }
                 if let Some(c) = &b.color
                     && !is_hex_color(c)
@@ -311,10 +328,10 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             let seconds = secs(dur);
 
             // background on V1
-            let (color, media, keep_audio) = match &sc.background {
-                Some(Background::Color(c)) => (Some(c.clone()), None, false),
-                Some(Background::Spec(b)) => (b.color.clone(), b.media.clone(), b.audio),
-                None => (None, None, false),
+            let (color, media, keep_audio, zoom) = match &sc.background {
+                Some(Background::Color(c)) => (Some(c.clone()), None, false, 100.0),
+                Some(Background::Spec(b)) => (b.color.clone(), b.media.clone(), b.audio, b.zoom.unwrap_or(105.0)),
+                None => (None, None, false, 100.0),
             };
             let bg = match media {
                 Some(path) => {
@@ -324,7 +341,19 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                         "timeline.place",
                         json!({"item": item, "track": "V1", "time": t.0, "duration": dur.0, "audio": keep_audio, "audioTrack": "A2"}),
                     )?;
-                    r["clips"][0].as_u64().or_else(|| r["clip"].as_u64())
+                    let clip = r["clips"][0].as_u64().or_else(|| r["clip"].as_u64());
+                    if let Some(c) = clip
+                        && zoom > 100.0
+                    {
+                        // a slow push-in keeps a still picture alive
+                        for (at, scale) in [(t, 100.0), (t + dur, zoom)] {
+                            s.execute(
+                                "effects.setParam",
+                                json!({"clip": c, "effect": "motion", "param": "scale", "value": scale, "time": at.0, "keyframe": true}),
+                            )?;
+                        }
+                    }
+                    clip
                 }
                 None => {
                     let color = color.or_else(|| plan.style.background.clone()).unwrap_or_else(|| "#101820".into());
@@ -340,15 +369,27 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             let mut text_clip = None;
             let title = sc.title.as_deref().filter(|x| !x.trim().is_empty());
             let body = sc.body.as_deref().filter(|x| !x.trim().is_empty());
+            let top_layout = sc.layout.as_deref() == Some("top");
+            let (title_top, body_top) = match (top_layout, body.is_some()) {
+                (true, _) => (0.045, 0.165),
+                (false, true) => (0.30, 0.54),
+                (false, false) => (0.36, 0.54),
+            };
+            let scale = if top_layout { 0.8 } else { 1.0 };
             for (k, (text, size, color, top)) in [
-                (title, title_size, plan.style.title_color.as_deref().unwrap_or("#ffffff"), if body.is_some() { 0.30 } else { 0.36 }),
-                (body, body_size, plan.style.body_color.as_deref().unwrap_or("#d9e2ec"), 0.54),
+                (title, (title_size * scale).round(), plan.style.title_color.as_deref().unwrap_or("#ffffff"), title_top),
+                (body, body_size, plan.style.body_color.as_deref().unwrap_or("#d9e2ec"), body_top),
             ]
             .into_iter()
             .enumerate()
             {
                 let Some(text) = text else { continue };
-                let box_h = if k == 0 { h as f64 * 0.30 } else { h as f64 * 0.2 };
+                let box_h = match (k, top_layout) {
+                    (0, true) => h as f64 * 0.12,
+                    (0, false) => h as f64 * 0.30,
+                    (_, true) => h as f64 * 0.08,
+                    _ => h as f64 * 0.2,
+                };
                 let mut q = json!({"text": text, "size": size, "box": [box_w, box_h], "position": [box_x, h as f64 * top]});
                 if let Some(f) = &plan.style.font {
                     q["font"] = json!(f);
@@ -376,7 +417,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
 
             // captions from the narration
             let mut captions = 0;
-            if let (Some(track), Some(text)) = (caption_track, sc.narration.as_deref()) {
+            if let (Some(track), Some(text)) = (caption_track, sc.caption.as_deref().or(sc.narration.as_deref())) {
                 // boundaries on whole frames, so neighbouring captions never overlap
                 let fd = rate.frame_duration().0.max(1);
                 let frame = |x: f64| Tick((ticks(x).0 as f64 / fd as f64).round() as i64 * fd);
@@ -428,7 +469,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,
