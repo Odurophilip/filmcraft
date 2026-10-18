@@ -353,6 +353,20 @@ fn word_phonemes(word: &str, lex: &Lexicon, overrides: Option<&BTreeMap<String, 
             }
         }
     }
+    // A possessive of a listed word ("Sevilla's") says the word as listed, then the -s.
+    if let Some(map) = overrides
+        && let Some(stem) = lower.strip_suffix("'s").or_else(|| lower.strip_suffix("\u{2019}s"))
+        && map.contains_key(stem)
+        && let Some(base) = word_phonemes(stem, lex, Some(map), lang)
+    {
+        let last = base.chars().rev().find(|c| !matches!(c, 'ˈ' | 'ˌ'));
+        let suffix = match last {
+            Some('s' | 'z' | 'ʃ' | 'ʒ' | 'ʧ' | 'ʤ') => "ɪz",
+            Some('p' | 't' | 'k' | 'f' | 'θ') => "s",
+            _ => "z",
+        };
+        return Some(base + suffix);
+    }
     // Spelled-out single letters use the letter's name; a lowercase single
     // letter that is a function word (a, i) stays on the normal path.
     if is_single_letter(word) {
@@ -1485,5 +1499,19 @@ PERCENT  P ER0 S EH1 N T
             prev = cur;
         }
         prev[b.len()]
+    }
+
+    #[test]
+    fn possessive_of_a_listed_word_keeps_its_pronunciation() {
+        let mut o = BTreeMap::new();
+        o.insert("Sevilla".to_string(), "/sɛvˈijə/".to_string());
+        o.insert("Mbappe".to_string(), "/ɛmbɑpˈA/".to_string());
+        let ov = Overrides(o);
+        let lex = Lexicon::empty();
+        let say = |t: &str| {
+            phonemize(t, Lang::EnUs, &lex, &ov).unwrap().into_iter().filter_map(|c| if let Chunk::Phonemes(p) = c { Some(p) } else { None }).collect::<String>()
+        };
+        assert!(say("Sevilla's").contains("sɛvˈijəz"), "{}", say("Sevilla's"));
+        assert!(say("Mbappe's goal").contains("ɛmbɑpˈAz"), "{}", say("Mbappe's goal"));
     }
 }

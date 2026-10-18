@@ -5,6 +5,8 @@
 //! reopen the script and voice settings. Editing a narration writes a new WAV (a new item) and
 //! swaps the clip over to it; the old item and its narration stay, so undo restores them exactly.
 
+use std::collections::BTreeMap;
+
 use filmcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
@@ -84,7 +86,15 @@ pub struct Narration {
     /// Length of the speech in the generated file. The file can be longer: when an edit made the
     /// speech shorter than its clip, the file is padded with silence to the clip's length.
     pub speech_duration: Tick,
+    /// How particular words are said: word (any case) → a plain-English respelling ("em bap ay")
+    /// or phonemes between slashes ("/ɛmbɑpˈA/"). Names and borrowed words mostly.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pronunciations: BTreeMap<String, String>,
 }
+
+/// Most entries a narration's pronunciation list may hold, and the longest word or value.
+pub const MAX_PRONUNCIATIONS: usize = 200;
+pub const MAX_PRONUNCIATION_LEN: usize = 200;
 
 impl Narration {
     /// Check values read from a project file or a command.
@@ -97,6 +107,16 @@ impl Narration {
         }
         if self.speech_duration < Tick::ZERO {
             return Err("negative speech duration".into());
+        }
+        if self.pronunciations.len() > MAX_PRONUNCIATIONS {
+            return Err(format!("at most {MAX_PRONUNCIATIONS} pronunciations"));
+        }
+        if self
+            .pronunciations
+            .iter()
+            .any(|(w, v)| w.trim().is_empty() || v.trim().is_empty() || w.len() > MAX_PRONUNCIATION_LEN || v.len() > MAX_PRONUNCIATION_LEN)
+        {
+            return Err(format!("each pronunciation needs a word and how to say it, up to {MAX_PRONUNCIATION_LEN} characters"));
         }
         Ok(())
     }
@@ -114,7 +134,22 @@ mod tests {
             pitch: VocalPitch::High,
             pace: 1.25,
             speech_duration: Tick::from_seconds_f64(2.5),
+            pronunciations: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn pronunciations_round_trip_and_are_bounded() {
+        let mut n = sample();
+        n.pronunciations.insert("Mbappe".into(), "/ɛmbɑpˈA/".into());
+        let back: Narration = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        // older projects without the field still load
+        let old = serde_json::to_string(&sample()).unwrap();
+        assert!(!old.contains("pronunciations"));
+        assert!(serde_json::from_str::<Narration>(&old).unwrap().pronunciations.is_empty());
+        n.pronunciations.insert("".into(), "x".into());
+        assert!(n.check().is_err());
     }
 
     #[test]

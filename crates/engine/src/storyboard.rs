@@ -53,6 +53,9 @@ struct Plan {
     fps: Option<f64>,
     voice: Option<String>,
     pace: Option<f64>,
+    /// How names and borrowed words are said in every narration (word → respelling, or
+    /// phonemes between slashes).
+    pronunciations: std::collections::BTreeMap<String, String>,
     /// Captions from the narration (default true).
     captions: Option<bool>,
     /// Video transition between scenes ("cross_dissolve" by default, "none" for cuts).
@@ -452,6 +455,9 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                 if let Some(pace) = plan.pace {
                     q["pace"] = json!(pace);
                 }
+                if !plan.pronunciations.is_empty() {
+                    q["pronunciations"] = json!(plan.pronunciations);
+                }
                 let r = s.execute("tts.create", q)?;
                 speech = secs(Tick(r["speechDuration"].as_i64().unwrap_or(0)));
                 narration = Some(id_of(&r, "clip")?);
@@ -692,7 +698,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true,"ring":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"pronunciations":{word:"respelling"|"/phonemes/"}?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true,"ring":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,

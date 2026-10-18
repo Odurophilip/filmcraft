@@ -71,9 +71,14 @@ impl Voice for NeuralVoice {
     }
 
     fn synthesize(&self, text: &str, params: &Params) -> Result<Audio, TtsError> {
+        self.synthesize_with(text, params, &Default::default())
+    }
+
+    fn synthesize_with(&self, text: &str, params: &Params, pronunciations: &std::collections::BTreeMap<String, String>) -> Result<Audio, TtsError> {
         check_text(text)?;
         params.check()?;
-        let chunks = filmcraft_tts_text::phonemize(text, Lang::EnUs, &self.lexicon, &Overrides::default()).map_err(|e| TtsError::Invalid(e.to_string()))?;
+        let overrides = Overrides(pronunciations.clone());
+        let chunks = filmcraft_tts_text::phonemize(text, Lang::EnUs, &self.lexicon, &overrides).map_err(|e| TtsError::Invalid(e.to_string()))?;
         let rate = KOKORO_RATE;
         let max = (MAX_SECONDS * f64::from(rate)) as usize;
         let mut out: Vec<f32> = Vec::new();

@@ -82,7 +82,15 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
         Some(v) => v.as_f64().ok_or_else(|| bad(cmd, "`pace` must be a number"))?,
         None => base.map_or(1.0, |b| b.pace),
     };
-    let n = Narration { text, language: info.language.to_string(), voice, pitch, pace, speech_duration: Tick::ZERO };
+    let pronunciations = match p.get("pronunciations") {
+        Some(Value::Object(m)) => m
+            .iter()
+            .map(|(w, v)| v.as_str().map(|v| (w.clone(), v.to_string())).ok_or_else(|| bad(cmd, "each pronunciation must be a string")))
+            .collect::<Result<_>>()?,
+        Some(Value::Null) | None => base.map(|b| b.pronunciations.clone()).unwrap_or_default(),
+        Some(_) => return Err(bad(cmd, "`pronunciations` must be an object of word → how to say it")),
+    };
+    let n = Narration { text, language: info.language.to_string(), voice, pitch, pace, speech_duration: Tick::ZERO, pronunciations };
     n.check().map_err(|e| bad(cmd, e))?;
     Ok(n)
 }
@@ -93,7 +101,8 @@ pub type SynthCache = Arc<Mutex<Vec<(String, Arc<tts::Audio>)>>>;
 const CACHE_ENTRIES: usize = 6;
 
 fn cache_key(n: &Narration) -> String {
-    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.text)
+    let said: String = n.pronunciations.iter().map(|(w, v)| format!("{w}\u{1e}{v}\u{1e}")).collect();
+    format!("{}\u{1f}{}\u{1f}{}\u{1f}{said}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.text)
 }
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
@@ -106,7 +115,7 @@ fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
 /// Synthesize `n` (no cache).
 fn render(n: &Narration, models_dir: Option<&std::path::Path>) -> std::result::Result<tts::Audio, tts::TtsError> {
     let voice = tts::voice_in(&n.voice, models_dir)?;
-    voice.synthesize(&n.text, &tts::Params { semitones: n.pitch.semitones(), pace: n.pace })
+    voice.synthesize_with(&n.text, &tts::Params { semitones: n.pitch.semitones(), pace: n.pace }, &n.pronunciations)
 }
 
 fn synthesize(s: &Session, cmd: &str, n: &Narration) -> Result<Arc<tts::Audio>> {
@@ -513,7 +522,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"pronunciations":{word:"respelling"|"/phonemes/"}?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
             has_seq,
             create,
             true,

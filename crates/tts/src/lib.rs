@@ -120,6 +120,12 @@ pub trait Voice: Send + Sync {
     fn info(&self) -> VoiceInfo;
     /// Speak `text` (pause markers allowed). Fails on an empty or over-long script, or bad params.
     fn synthesize(&self, text: &str, params: &Params) -> Result<Audio, TtsError>;
+    /// [`Voice::synthesize`] saying the words in `pronunciations` (word → respelling, or phonemes
+    /// between slashes) as given. Voices without a pronunciation stage ignore the list.
+    fn synthesize_with(&self, text: &str, params: &Params, pronunciations: &std::collections::BTreeMap<String, String>) -> Result<Audio, TtsError> {
+        let _ = pronunciations;
+        self.synthesize(text, params)
+    }
 }
 
 /// Languages offered (English only for now).
