@@ -367,3 +367,31 @@ fn deleting_bin_preserves_intermediate_subclip_needed_by_surviving_clip() {
     assert_eq!(s.project.root.parent_of(parent), Some(bin));
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A 1×1 PNG.
+const PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0,
+    0, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0, 0, 0, 0, 0x49, 0x45,
+    0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+#[test]
+fn relinking_an_image_sequence_keeps_it_a_sequence() {
+    let root = tmp_dir("relink-sequence");
+    let (a, b) = (root.join("a"), root.join("b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+        for i in 0..3 {
+            std::fs::write(d.join(format!("f{i:04}.png")), PNG).unwrap();
+        }
+    }
+    let mut s = Session::default();
+    let r = s.execute("file.import", json!({"paths": [a.join("f0000.png").to_string_lossy()], "imageSequence": true})).unwrap();
+    let item = ItemId(r["items"][0].as_u64().unwrap());
+    let before = s.project.item(item).unwrap().as_media().unwrap().info.clone();
+    assert_eq!(before.kind, filmcraft_media::MediaKind::ImageSequence);
+    s.execute("media.relink", json!({"item": item.0, "path": b.join("f0000.png").to_string_lossy(), "force": true, "relinkOthers": false})).unwrap();
+    let after = s.project.item(item).unwrap().as_media().unwrap().info.clone();
+    assert_eq!(after.kind, filmcraft_media::MediaKind::ImageSequence, "still a sequence after relinking, not a still");
+    assert_eq!(after.duration, before.duration, "all three frames");
+}

@@ -197,6 +197,17 @@ pub struct Candidate {
 
 /// Check `path` as the new file of media item `item`. Opening the file (needed for duration,
 /// timecode and metadata) is skipped when a cheap check already failed.
+/// Open `path` the way the item's media was opened: an image sequence stays a sequence (its
+/// frames from that number on, at the item's frame rate), anything else is opened as a file.
+fn open_like(s: &Session, info: &MediaInfo, path: &str) -> std::result::Result<filmcraft_media::SharedSource, filmcraft_media::MediaError> {
+    if info.kind == filmcraft_media::MediaKind::ImageSequence {
+        let name = file_name(path).to_string();
+        crate::media_pool::open_image_sequence(path, &*s.services, info.frame_rate(), &name)
+    } else {
+        s.media.open_file(path, &*s.services)
+    }
+}
+
 pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) -> Result<Candidate> {
     let it = s.project.item(item).ok_or_else(|| bad("media.relink", format!("no item {}", item.0)))?;
     let m = it.as_media().ok_or_else(|| bad("media.relink", format!("item {} is not media", item.0)))?;
@@ -236,7 +247,7 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
         }
     }
     if c.problems.is_empty() {
-        match s.media.open_file(path, &*s.services) {
+        match open_like(s, &m.info, path) {
             Ok(src) => {
                 let info = src.info().clone();
                 let fd = m.info.frame_rate().frame_duration();
@@ -414,7 +425,11 @@ pub fn relink(s: &mut Session, p: &Value) -> Result<Value> {
     if c.source.is_none() {
         // Forced past a failed check: the file was never opened for its properties, so do it now
         // and let the item take the new file's own info instead of keeping the old file's.
-        let Ok(src) = s.media.open_file(&path, &*s.services) else {
+        let opened = match s.project.item(item).and_then(|i| i.as_media()) {
+            Some(m) => open_like(s, &m.info, &path),
+            None => s.media.open_file(&path, &*s.services),
+        };
+        let Ok(src) = opened else {
             return Err(EngineError::Other(format!("{path} can't be opened")));
         };
         c.info = Some(src.info().clone());
