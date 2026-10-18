@@ -111,6 +111,8 @@ struct Image {
     enter: Option<String>,
     /// Slow push-in after the entrance: the scale it ends at, in percent (default 103).
     zoom: Option<f64>,
+    /// `media` is the first frame of a numbered image sequence (an animated picture).
+    sequence: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -499,7 +501,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             let camera = sc.image.is_some() && sc.highlights.iter().any(|hl| hl.zoom.unwrap_or(true));
             let mut base = 100.0;
             if let Some(img) = &sc.image {
-                let r = s.execute("file.import", json!({"paths": [img.media]}))?;
+                let r = s.execute("file.import", json!({"paths": [img.media], "imageSequence": img.sequence}))?;
                 let item = r["items"][0].as_u64().ok_or_else(|| EngineError::Other(format!("{CMD}: could not import `{}`", img.media)))?;
                 // a picture bigger than the frame (a 2× render, sharp when the camera moves in) fits it
                 if let Some((iw, ih)) = s.source(filmcraft_project::ItemId(item)).and_then(|src| src.info().video.as_ref().map(|v| (v.width, v.height))) {
@@ -684,7 +686,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,
