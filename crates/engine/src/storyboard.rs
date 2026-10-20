@@ -92,7 +92,8 @@ struct Scene {
     /// "fadeUp" (default), "fade", "pop", "slideLeft", "none".
     animation: Option<String>,
     voice: Option<String>,
-    /// "center" (default) or "top": the text above a picture (a screenshot in the background).
+    /// "center" (default), "top" (the text above a picture) or "left" (the text in a left column,
+    /// left-aligned, beside a picture on the right — a phone; tall frames put it on top).
     layout: Option<String>,
     /// Caption text when it should read differently from what the voice says (a name spelled
     /// for the voice, "dot io" for ".io"); default: the narration.
@@ -211,9 +212,9 @@ fn validate(p: &Plan) -> Result<()> {
             return Err(bad(CMD, format!("scene {n}: unknown `animation` `{a}` (fadeUp, fade, pop, slideLeft, none)")));
         }
         if let Some(l) = &sc.layout
-            && !["center", "top"].contains(&l.as_str())
+            && !["center", "top", "left"].contains(&l.as_str())
         {
-            return Err(bad(CMD, format!("scene {n}: unknown `layout` `{l}` (center, top)")));
+            return Err(bad(CMD, format!("scene {n}: unknown `layout` `{l}` (center, top, left)")));
         }
         if let Some(img) = &sc.image {
             if !std::path::Path::new(&img.media).is_file() {
@@ -528,13 +529,16 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             let mut text_clips = Vec::new();
             let title = sc.title.as_deref().filter(|x| !x.trim().is_empty());
             let body = sc.body.as_deref().filter(|x| !x.trim().is_empty());
-            let top_layout = sc.layout.as_deref() == Some("top");
-            let (title_top, body_top) = match (top_layout, body.is_some()) {
-                (true, _) => (0.045, 0.165),
-                (false, true) => (0.30, 0.54),
-                (false, false) => (0.36, 0.54),
+            let left_layout = sc.layout.as_deref() == Some("left") && w > h;
+            let top_layout = sc.layout.as_deref() == Some("top") || (sc.layout.as_deref() == Some("left") && w <= h);
+            let (title_top, body_top) = match (top_layout, left_layout, body.is_some()) {
+                (true, _, _) => (0.045, 0.165),
+                (_, true, _) => (0.3, 0.52),
+                (false, false, true) => (0.30, 0.54),
+                (false, false, false) => (0.36, 0.54),
             };
-            let scale = if top_layout { 0.8 } else { 1.0 };
+            let scale = if top_layout { 0.8 } else if left_layout { 0.82 } else { 1.0 };
+            let (box_w, box_x, align) = if left_layout { (w as f64 * 0.44, w as f64 * 0.07, "left") } else { (box_w, box_x, "center") };
             for (k, (text, size, color, top)) in [
                 (title, (title_size * scale).round(), plan.style.title_color.as_deref().unwrap_or("#ffffff"), title_top),
                 (body, body_size, plan.style.body_color.as_deref().unwrap_or("#d9e2ec"), body_top),
@@ -544,6 +548,8 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
             {
                 let Some(text) = text else { continue };
                 let box_h = match (k, top_layout) {
+                    (0, false) if left_layout => h as f64 * 0.22,
+                    (_, false) if left_layout => h as f64 * 0.2,
                     (0, true) => h as f64 * 0.12,
                     (0, false) => h as f64 * 0.30,
                     (_, true) => h as f64 * 0.08,
@@ -564,7 +570,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
                 let r = s.execute("graphics.newText", q)?;
                 let clip = id_of(&r, "clip")?;
                 let layer = r["layer"].as_u64().unwrap_or(0);
-                s.execute("graphics.set", json!({"clip": clip, "layer": layer, "props": {"fill_color": color, "align": "center"}}))?;
+                s.execute("graphics.set", json!({"clip": clip, "layer": layer, "props": {"fill_color": color, "align": align}}))?;
                 animate(s, clip, t + delay, dur - delay, sc.animation.as_deref().unwrap_or("fadeUp"), (w, h))?;
                 text_clip.get_or_insert(clip);
                 text_clips.push(clip);
@@ -698,7 +704,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "New Video from Storyboard…",
         menu: &[],
         shortcut: None,
-        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"pronunciations":{word:"respelling"|"/phonemes/"}?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true,"ring":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
+        params: r##"{"plan":{"name":str?,"format":"16:9|9:16|1:1|4:5"?,"width":u32?,"height":u32?,"fps":f64=30,"voice":str?,"pace":0.5..2?,"pronunciations":{word:"respelling"|"/phonemes/"}?,"captions":bool=true,"transition":"cross_dissolve|none|<video transition>"?,"transition_seconds":f64=0.5,"music":path?,"music_db":f64=-18,"style":{"font":str?,"title_color":"#rrggbb"?,"body_color":"#rrggbb"?,"background":"#rrggbb"?,"accent":"#rrggbb"?}?,"scenes":[{"background":"#rrggbb"|{"color":"#rrggbb"?,"media":path?,"audio":bool?,"zoom":100..150?,"sequence":bool?}?,"title":str?,"body":str?,"narration":str?,"seconds":f64?,"animation":"fadeUp|fade|pop|slideLeft|none"?,"voice":str?,"layout":"center|top|left"?,"caption":str?,"image":{"media":path,"enter":"slideUp|fade|pop|none"?,"zoom":100..150?,"sequence":bool?}?,"highlights":[{"x":px,"y":px,"w":px,"h":px,"at":s?,"seconds":s?,"color":"#rrggbb"?,"zoom":bool=true,"ring":bool=true}]?,"transition":str?}]}} (or the plan itself as the params)"##,
         enabled: always,
         run: build,
         journal: true,

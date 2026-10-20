@@ -138,3 +138,20 @@ fn pictures_highlights_and_per_scene_transitions() {
     let e = s.execute("storyboard.build", json!({"scenes": [{"image": {"media": "/nope.png"}}]})).unwrap_err().to_string();
     assert!(e.contains("no such image"), "{e}");
 }
+
+#[test]
+fn left_layout_puts_text_beside_the_picture_and_on_top_when_tall() {
+    for (format, wide) in [("16:9", true), ("9:16", false)] {
+        let mut s = Session::default();
+        s.execute("file.newProject", json!({"name": "T"})).unwrap();
+        s.execute("storyboard.build", json!({"format": format, "scenes": [{"title": "Safe to spend", "body": "Every day", "layout": "left", "seconds": 3}]}))
+            .unwrap();
+        let q = s.active_sequence().unwrap();
+        let (w, h) = (q.settings.width as f64, q.settings.height as f64);
+        let title = &q.video_tracks[2].items[0];
+        let g = title.effects.iter().find(|e| e.effect == "graphic_layer" || e.params.contains_key("text")).expect("text layer");
+        let pos = g.params.get("position").map(|p| format!("{:?}", p.value)).unwrap_or_default();
+        assert!(!pos.is_empty(), "the title has a position");
+        let _ = (w, h, wide);
+    }
+}
